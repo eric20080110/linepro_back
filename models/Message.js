@@ -7,6 +7,8 @@ const MessageSchema = new mongoose.Schema({
   groupId:    { type: mongoose.Schema.Types.ObjectId, ref: 'Group' },
   text:       { type: String, required: true },
   timestamp:  { type: Date, default: Date.now, index: true },
+  // 已讀功能: array of userIds who have read this message
+  readBy:     [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
 }, { timestamps: true })
 
 MessageSchema.index({ type: 1, senderId: 1, receiverId: 1, timestamp: -1 })

@@ -5,7 +5,7 @@ const Message = require('../models/Message')
 const Group = require('../models/Group')
 const { getDMRoomId, getGroupRoomId } = require('../socket/roomHelpers')
 
-// GET /api/messages/dm/:partnerId?limit=50&before=<timestamp>
+// GET /api/messages/dm/:partnerId
 router.get('/dm/:partnerId', requireAuth, async (req, res) => {
   const { partnerId } = req.params
   const limit = Math.min(parseInt(req.query.limit) || 50, 100)
@@ -26,13 +26,12 @@ router.get('/dm/:partnerId', requireAuth, async (req, res) => {
   res.json(messages.reverse())
 })
 
-// GET /api/messages/group/:groupId?limit=50&before=<timestamp>
+// GET /api/messages/group/:groupId
 router.get('/group/:groupId', requireAuth, async (req, res) => {
   const { groupId } = req.params
   const limit = Math.min(parseInt(req.query.limit) || 50, 100)
   const before = req.query.before ? new Date(req.query.before) : new Date()
 
-  // Verify membership
   const group = await Group.findOne({ _id: groupId, members: req.userId })
   if (!group) return res.status(403).json({ error: 'Not a member' })
 
@@ -48,7 +47,7 @@ router.get('/group/:groupId', requireAuth, async (req, res) => {
   res.json(messages.reverse())
 })
 
-// POST /api/messages/dm — { receiverId, text }
+// POST /api/messages/dm
 router.post('/dm', requireAuth, async (req, res) => {
   const { receiverId, text } = req.body
   if (!receiverId || !text?.trim()) {
@@ -61,6 +60,7 @@ router.post('/dm', requireAuth, async (req, res) => {
     receiverId,
     text: text.trim(),
     timestamp: new Date(),
+    readBy: [req.userId], // sender has "read" their own message
   })
   await message.populate('senderId', 'name avatarColor')
 
@@ -71,7 +71,7 @@ router.post('/dm', requireAuth, async (req, res) => {
   res.json(message)
 })
 
-// POST /api/messages/group — { groupId, text }
+// POST /api/messages/group
 router.post('/group', requireAuth, async (req, res) => {
   const { groupId, text } = req.body
   if (!groupId || !text?.trim()) {
@@ -87,6 +87,7 @@ router.post('/group', requireAuth, async (req, res) => {
     groupId,
     text: text.trim(),
     timestamp: new Date(),
+    readBy: [req.userId],
   })
   await message.populate('senderId', 'name avatarColor')
 
@@ -96,7 +97,61 @@ router.post('/group', requireAuth, async (req, res) => {
   res.json(message)
 })
 
-// DELETE /api/messages/dm/:partnerId — delete all DM messages between me and partner
+// POST /api/messages/dm/:partnerId/read — mark all DM messages from partner as read
+router.post('/dm/:partnerId/read', requireAuth, async (req, res) => {
+  const { partnerId } = req.params
+
+  // Mark all unread messages sent by partner to me as read
+  await Message.updateMany(
+    {
+      type: 'dm',
+      senderId: partnerId,
+      receiverId: req.userId,
+      readBy: { $ne: req.userId },
+    },
+    { $addToSet: { readBy: req.userId } }
+  )
+
+  // Emit to the room so the partner sees the 已讀 update
+  const io = req.app.get('io')
+  const roomId = getDMRoomId(req.userId.toString(), partnerId)
+  io.to(roomId).emit('messages_read', {
+    readerId: req.userId,
+    partnerId: req.userId,
+    type: 'dm',
+  })
+
+  res.json({ ok: true })
+})
+
+// POST /api/messages/group/:groupId/read — mark all unread group messages as read
+router.post('/group/:groupId/read', requireAuth, async (req, res) => {
+  const { groupId } = req.params
+
+  const group = await Group.findOne({ _id: groupId, members: req.userId })
+  if (!group) return res.status(403).json({ error: 'Not a member' })
+
+  await Message.updateMany(
+    {
+      type: 'group',
+      groupId,
+      senderId: { $ne: req.userId },
+      readBy: { $ne: req.userId },
+    },
+    { $addToSet: { readBy: req.userId } }
+  )
+
+  const io = req.app.get('io')
+  io.to(getGroupRoomId(groupId)).emit('messages_read', {
+    readerId: req.userId,
+    groupId,
+    type: 'group',
+  })
+
+  res.json({ ok: true })
+})
+
+// DELETE /api/messages/dm/:partnerId
 router.delete('/dm/:partnerId', requireAuth, async (req, res) => {
   const { partnerId } = req.params
   await Message.deleteMany({
@@ -109,7 +164,7 @@ router.delete('/dm/:partnerId', requireAuth, async (req, res) => {
   res.json({ ok: true })
 })
 
-// DELETE /api/messages/group/:groupId — delete all messages in a group (admin only)
+// DELETE /api/messages/group/:groupId
 router.delete('/group/:groupId', requireAuth, async (req, res) => {
   const { groupId } = req.params
   const group = await Group.findOne({ _id: groupId, members: req.userId })

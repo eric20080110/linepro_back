@@ -6,25 +6,39 @@ const cors = require('cors')
 const connectDB = require('./config/db')
 const setupSocket = require('./socket/handlers')
 
-const usersRouter   = require('./routes/users')
-const friendsRouter = require('./routes/friends')
-const groupsRouter  = require('./routes/groups')
+const usersRouter    = require('./routes/users')
+const friendsRouter  = require('./routes/friends')
+const groupsRouter   = require('./routes/groups')
 const messagesRouter = require('./routes/messages')
 
 const app = express()
 const server = http.createServer(app)
 
-const io = new Server(server, {
-  cors: {
-    origin: process.env.FRONTEND_URL || 'http://localhost:5174',
-    methods: ['GET', 'POST'],
+// Allow multiple origins (local dev + Render frontend)
+const ALLOWED_ORIGINS = (process.env.FRONTEND_URL || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean)
+  .concat(['http://localhost:5173', 'http://localhost:5174'])
+
+const corsOptions = {
+  origin: (origin, cb) => {
+    // Allow requests with no origin (curl, mobile apps) and listed origins
+    if (!origin || ALLOWED_ORIGINS.some(o => origin.startsWith(o))) {
+      cb(null, true)
+    } else {
+      cb(new Error(`CORS blocked: ${origin}`))
+    }
   },
+  credentials: true,
+}
+
+const io = new Server(server, {
+  cors: { origin: corsOptions.origin, methods: ['GET', 'POST'], credentials: true },
 })
 
-// Make io accessible in routes via req.app.get('io')
 app.set('io', io)
-
-app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5174' }))
+app.use(cors(corsOptions))
 app.use(express.json())
 
 app.use('/api/users',    usersRouter)
@@ -32,10 +46,9 @@ app.use('/api/friends',  friendsRouter)
 app.use('/api/groups',   groupsRouter)
 app.use('/api/messages', messagesRouter)
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }))
+app.get('/health', (_, res) => res.json({ status: 'ok' }))
 
-// Global error handler
-app.use((err, req, res, next) => {
+app.use((err, req, res, _next) => {
   console.error(err)
   res.status(500).json({ error: 'Internal server error' })
 })
@@ -43,9 +56,6 @@ app.use((err, req, res, next) => {
 setupSocket(io)
 
 const PORT = process.env.PORT || 3001
-
 connectDB().then(() => {
-  server.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`)
-  })
+  server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`))
 })
