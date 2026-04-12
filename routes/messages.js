@@ -1,145 +1,195 @@
 const express = require('express')
 const router = express.Router()
 const { requireAuth } = require('../middleware/auth')
-const Message = require('../models/Message')
-const Group = require('../models/Group')
+const { db } = require('../config/db')
 const { getDMRoomId, getGroupRoomId } = require('../socket/roomHelpers')
+const { randomUUID } = require('crypto')
+
+// Helper: shape a message row into the object the frontend expects
+function rowToMessage(row) {
+  return {
+    _id: row.id,
+    type: row.type,
+    senderId: {
+      _id: row.sender_id,
+      name: row.sender_name,
+      nickname: row.sender_nickname || '',
+      avatarColor: row.sender_color,
+    },
+    receiverId: row.receiver_id || null,
+    groupId: row.group_id || null,
+    text: row.text,
+    timestamp: Number(row.timestamp),
+    readBy: row.read_by ? String(row.read_by).split(',') : [],
+  }
+}
+
+const MSG_SELECT = `
+  SELECT m.id, m.type, m.sender_id, m.receiver_id, m.group_id, m.text, m.timestamp,
+    u.name AS sender_name, u.nickname AS sender_nickname, u.avatar_color AS sender_color,
+    GROUP_CONCAT(mr.user_id) AS read_by
+  FROM messages m
+  JOIN users u ON u.id = m.sender_id
+  LEFT JOIN message_reads mr ON mr.message_id = m.id
+`
 
 // GET /api/messages/dm/:partnerId
 router.get('/dm/:partnerId', requireAuth, async (req, res) => {
   const { partnerId } = req.params
   const limit = Math.min(parseInt(req.query.limit) || 50, 100)
-  const before = req.query.before ? new Date(req.query.before) : new Date()
+  const before = req.query.before ? Number(req.query.before) : Date.now()
 
-  const messages = await Message.find({
-    type: 'dm',
-    $or: [
-      { senderId: req.userId, receiverId: partnerId },
-      { senderId: partnerId, receiverId: req.userId },
-    ],
-    timestamp: { $lt: before },
+  const result = await db.execute({
+    sql: `${MSG_SELECT}
+      WHERE m.type = 'dm'
+        AND ((m.sender_id = ? AND m.receiver_id = ?) OR (m.sender_id = ? AND m.receiver_id = ?))
+        AND m.timestamp < ?
+      GROUP BY m.id
+      ORDER BY m.timestamp DESC
+      LIMIT ?`,
+    args: [req.userId, partnerId, partnerId, req.userId, before, limit],
   })
-    .sort({ timestamp: -1 })
-    .limit(limit)
-    .populate('senderId', 'name avatarColor')
-
-  res.json(messages.reverse())
+  res.json(result.rows.map(rowToMessage).reverse())
 })
 
 // GET /api/messages/group/:groupId
 router.get('/group/:groupId', requireAuth, async (req, res) => {
   const { groupId } = req.params
   const limit = Math.min(parseInt(req.query.limit) || 50, 100)
-  const before = req.query.before ? new Date(req.query.before) : new Date()
+  const before = req.query.before ? Number(req.query.before) : Date.now()
 
-  const group = await Group.findOne({ _id: groupId, members: req.userId })
-  if (!group) return res.status(403).json({ error: 'Not a member' })
-
-  const messages = await Message.find({
-    type: 'group',
-    groupId,
-    timestamp: { $lt: before },
+  const isMember = await db.execute({
+    sql: 'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
+    args: [groupId, req.userId],
   })
-    .sort({ timestamp: -1 })
-    .limit(limit)
-    .populate('senderId', 'name avatarColor')
+  if (isMember.rows.length === 0) return res.status(403).json({ error: 'Not a member' })
 
-  res.json(messages.reverse())
+  const result = await db.execute({
+    sql: `${MSG_SELECT}
+      WHERE m.type = 'group' AND m.group_id = ? AND m.timestamp < ?
+      GROUP BY m.id
+      ORDER BY m.timestamp DESC
+      LIMIT ?`,
+    args: [groupId, before, limit],
+  })
+  res.json(result.rows.map(rowToMessage).reverse())
 })
 
 // POST /api/messages/dm
 router.post('/dm', requireAuth, async (req, res) => {
   const { receiverId, text } = req.body
-  if (!receiverId || !text?.trim()) {
-    return res.status(400).json({ error: 'receiverId and text required' })
-  }
+  if (!receiverId || !text?.trim()) return res.status(400).json({ error: 'receiverId and text required' })
 
-  const message = await Message.create({
-    type: 'dm',
-    senderId: req.userId,
-    receiverId,
-    text: text.trim(),
-    timestamp: new Date(),
-    readBy: [req.userId], // sender has "read" their own message
+  const id = randomUUID()
+  const ts = Date.now()
+  await db.batch([
+    {
+      sql: 'INSERT INTO messages (id, type, sender_id, receiver_id, text, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
+      args: [id, 'dm', req.userId, receiverId, text.trim(), ts],
+    },
+    { sql: 'INSERT OR IGNORE INTO message_reads (message_id, user_id) VALUES (?, ?)', args: [id, req.userId] },
+  ], 'write')
+
+  const result = await db.execute({
+    sql: `${MSG_SELECT} WHERE m.id = ? GROUP BY m.id`,
+    args: [id],
   })
-  await message.populate('senderId', 'name avatarColor')
+  const message = rowToMessage(result.rows[0])
 
   const io = req.app.get('io')
-  const roomId = getDMRoomId(req.userId.toString(), receiverId)
-  io.to(roomId).emit('new_message', message)
-
+  io.to(getDMRoomId(req.userId, receiverId)).emit('new_message', message)
   res.json(message)
 })
 
 // POST /api/messages/group
 router.post('/group', requireAuth, async (req, res) => {
   const { groupId, text } = req.body
-  if (!groupId || !text?.trim()) {
-    return res.status(400).json({ error: 'groupId and text required' })
-  }
+  if (!groupId || !text?.trim()) return res.status(400).json({ error: 'groupId and text required' })
 
-  const group = await Group.findOne({ _id: groupId, members: req.userId })
-  if (!group) return res.status(403).json({ error: 'Not a member' })
-
-  const message = await Message.create({
-    type: 'group',
-    senderId: req.userId,
-    groupId,
-    text: text.trim(),
-    timestamp: new Date(),
-    readBy: [req.userId],
+  const isMember = await db.execute({
+    sql: 'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
+    args: [groupId, req.userId],
   })
-  await message.populate('senderId', 'name avatarColor')
+  if (isMember.rows.length === 0) return res.status(403).json({ error: 'Not a member' })
+
+  const id = randomUUID()
+  const ts = Date.now()
+  await db.batch([
+    {
+      sql: 'INSERT INTO messages (id, type, sender_id, group_id, text, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
+      args: [id, 'group', req.userId, groupId, text.trim(), ts],
+    },
+    { sql: 'INSERT OR IGNORE INTO message_reads (message_id, user_id) VALUES (?, ?)', args: [id, req.userId] },
+  ], 'write')
+
+  const result = await db.execute({
+    sql: `${MSG_SELECT} WHERE m.id = ? GROUP BY m.id`,
+    args: [id],
+  })
+  const message = rowToMessage(result.rows[0])
 
   const io = req.app.get('io')
   io.to(getGroupRoomId(groupId)).emit('new_message', message)
-
   res.json(message)
 })
 
-// POST /api/messages/dm/:partnerId/read — mark all DM messages from partner as read
+// POST /api/messages/dm/:partnerId/read
 router.post('/dm/:partnerId/read', requireAuth, async (req, res) => {
   const { partnerId } = req.params
 
-  // Mark all unread messages sent by partner to me as read
-  await Message.updateMany(
-    {
-      type: 'dm',
-      senderId: partnerId,
-      receiverId: req.userId,
-      readBy: { $ne: req.userId },
-    },
-    { $addToSet: { readBy: req.userId } }
-  )
+  // Get all unread messages from partner to me
+  const unread = await db.execute({
+    sql: `SELECT m.id FROM messages m
+          LEFT JOIN message_reads mr ON mr.message_id = m.id AND mr.user_id = ?
+          WHERE m.type = 'dm' AND m.sender_id = ? AND m.receiver_id = ? AND mr.message_id IS NULL`,
+    args: [req.userId, partnerId, req.userId],
+  })
 
-  // Emit to the room so the partner sees the 已讀 update
+  if (unread.rows.length > 0) {
+    await db.batch(
+      unread.rows.map(r => ({
+        sql: 'INSERT OR IGNORE INTO message_reads (message_id, user_id) VALUES (?, ?)',
+        args: [r.id, req.userId],
+      })),
+      'write'
+    )
+  }
+
   const io = req.app.get('io')
-  const roomId = getDMRoomId(req.userId.toString(), partnerId)
-  io.to(roomId).emit('messages_read', {
+  io.to(getDMRoomId(req.userId, partnerId)).emit('messages_read', {
     readerId: req.userId,
     partnerId: req.userId,
     type: 'dm',
   })
-
   res.json({ ok: true })
 })
 
-// POST /api/messages/group/:groupId/read — mark all unread group messages as read
+// POST /api/messages/group/:groupId/read
 router.post('/group/:groupId/read', requireAuth, async (req, res) => {
   const { groupId } = req.params
 
-  const group = await Group.findOne({ _id: groupId, members: req.userId })
-  if (!group) return res.status(403).json({ error: 'Not a member' })
+  const isMember = await db.execute({
+    sql: 'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
+    args: [groupId, req.userId],
+  })
+  if (isMember.rows.length === 0) return res.status(403).json({ error: 'Not a member' })
 
-  await Message.updateMany(
-    {
-      type: 'group',
-      groupId,
-      senderId: { $ne: req.userId },
-      readBy: { $ne: req.userId },
-    },
-    { $addToSet: { readBy: req.userId } }
-  )
+  const unread = await db.execute({
+    sql: `SELECT m.id FROM messages m
+          LEFT JOIN message_reads mr ON mr.message_id = m.id AND mr.user_id = ?
+          WHERE m.type = 'group' AND m.group_id = ? AND m.sender_id != ? AND mr.message_id IS NULL`,
+    args: [req.userId, groupId, req.userId],
+  })
+
+  if (unread.rows.length > 0) {
+    await db.batch(
+      unread.rows.map(r => ({
+        sql: 'INSERT OR IGNORE INTO message_reads (message_id, user_id) VALUES (?, ?)',
+        args: [r.id, req.userId],
+      })),
+      'write'
+    )
+  }
 
   const io = req.app.get('io')
   io.to(getGroupRoomId(groupId)).emit('messages_read', {
@@ -147,29 +197,47 @@ router.post('/group/:groupId/read', requireAuth, async (req, res) => {
     groupId,
     type: 'group',
   })
-
   res.json({ ok: true })
 })
 
 // DELETE /api/messages/dm/:partnerId
 router.delete('/dm/:partnerId', requireAuth, async (req, res) => {
   const { partnerId } = req.params
-  await Message.deleteMany({
-    type: 'dm',
-    $or: [
-      { senderId: req.userId, receiverId: partnerId },
-      { senderId: partnerId, receiverId: req.userId },
-    ],
+  const msgs = await db.execute({
+    sql: `SELECT id FROM messages WHERE type = 'dm'
+          AND ((sender_id = ? AND receiver_id = ?) OR (sender_id = ? AND receiver_id = ?))`,
+    args: [req.userId, partnerId, partnerId, req.userId],
   })
+  if (msgs.rows.length > 0) {
+    const ids = msgs.rows.map(r => r.id)
+    await db.batch([
+      ...ids.map(id => ({ sql: 'DELETE FROM message_reads WHERE message_id = ?', args: [id] })),
+      ...ids.map(id => ({ sql: 'DELETE FROM messages WHERE id = ?', args: [id] })),
+    ], 'write')
+  }
   res.json({ ok: true })
 })
 
 // DELETE /api/messages/group/:groupId
 router.delete('/group/:groupId', requireAuth, async (req, res) => {
   const { groupId } = req.params
-  const group = await Group.findOne({ _id: groupId, members: req.userId })
-  if (!group) return res.status(403).json({ error: 'Not a member' })
-  await Message.deleteMany({ type: 'group', groupId })
+  const isMember = await db.execute({
+    sql: 'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
+    args: [groupId, req.userId],
+  })
+  if (isMember.rows.length === 0) return res.status(403).json({ error: 'Not a member' })
+
+  const msgs = await db.execute({
+    sql: `SELECT id FROM messages WHERE type = 'group' AND group_id = ?`,
+    args: [groupId],
+  })
+  if (msgs.rows.length > 0) {
+    const ids = msgs.rows.map(r => r.id)
+    await db.batch([
+      ...ids.map(id => ({ sql: 'DELETE FROM message_reads WHERE message_id = ?', args: [id] })),
+      ...ids.map(id => ({ sql: 'DELETE FROM messages WHERE id = ?', args: [id] })),
+    ], 'write')
+  }
   res.json({ ok: true })
 })
 

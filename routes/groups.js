@@ -1,14 +1,45 @@
 const express = require('express')
 const router = express.Router()
 const { requireAuth } = require('../middleware/auth')
-const Group = require('../models/Group')
+const { db, rowToUser } = require('../config/db')
+const { randomUUID } = require('crypto')
 
 const COLORS = ['#06C755', '#FF6B6B', '#4ECDC4', '#9B59B6', '#F39C12']
 
+// Helper: fetch a group with members populated
+async function fetchGroup(groupId) {
+  const gRow = await db.execute({ sql: 'SELECT * FROM groups WHERE id = ?', args: [groupId] })
+  if (gRow.rows.length === 0) return null
+  const g = gRow.rows[0]
+
+  const membersRow = await db.execute({
+    sql: `SELECT u.*, gm.is_admin FROM users u
+          JOIN group_members gm ON gm.user_id = u.id
+          WHERE gm.group_id = ?`,
+    args: [groupId],
+  })
+  const members = membersRow.rows.map(rowToUser)
+  const admins = membersRow.rows.filter(r => r.is_admin).map(r => r.id)
+
+  return {
+    _id: g.id,
+    name: g.name,
+    description: g.description,
+    avatarColor: g.avatar_color,
+    createdBy: g.created_by,
+    members,
+    admins,
+  }
+}
+
 // GET /api/groups
 router.get('/', requireAuth, async (req, res) => {
-  const groups = await Group.find({ members: req.userId }).populate('members admins createdBy')
-  res.json(groups)
+  const groupIds = await db.execute({
+    sql: 'SELECT group_id FROM group_members WHERE user_id = ?',
+    args: [req.userId],
+  })
+  const groups = await Promise.all(groupIds.rows.map(r => fetchGroup(r.group_id)))
+  res.json(groups.filter(Boolean))
 })
 
 // POST /api/groups
@@ -16,60 +47,83 @@ router.post('/', requireAuth, async (req, res) => {
   const { name, description, memberIds = [] } = req.body
   if (!name) return res.status(400).json({ error: 'name required' })
 
-  const allMembers = [...new Set([req.userId.toString(), ...memberIds])]
-  const group = await Group.create({
-    name,
-    description: description || '',
-    avatarColor: COLORS[Math.floor(Math.random() * COLORS.length)],
-    members: allMembers,
-    admins: [req.userId],
-    createdBy: req.userId,
-  })
-  const populated = await group.populate('members admins createdBy')
-  res.json(populated)
+  const groupId = randomUUID()
+  const color = COLORS[Math.floor(Math.random() * COLORS.length)]
+  const allMemberIds = [...new Set([req.userId, ...memberIds])]
+
+  await db.batch([
+    {
+      sql: 'INSERT INTO groups (id, name, description, avatar_color, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+      args: [groupId, name, description || '', color, req.userId, Date.now()],
+    },
+    ...allMemberIds.map(uid => ({
+      sql: 'INSERT INTO group_members (group_id, user_id, is_admin) VALUES (?, ?, ?)',
+      args: [groupId, uid, uid === req.userId ? 1 : 0],
+    })),
+  ], 'write')
+
+  const group = await fetchGroup(groupId)
+  res.json(group)
 })
 
 // GET /api/groups/:id
 router.get('/:id', requireAuth, async (req, res) => {
-  const group = await Group.findOne({ _id: req.params.id, members: req.userId })
-    .populate('members admins createdBy')
-  if (!group) return res.status(404).json({ error: 'Group not found' })
+  // Verify membership
+  const member = await db.execute({
+    sql: 'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
+    args: [req.params.id, req.userId],
+  })
+  if (member.rows.length === 0) return res.status(404).json({ error: 'Group not found' })
+  const group = await fetchGroup(req.params.id)
   res.json(group)
 })
 
 // POST /api/groups/:id/members
 router.post('/:id/members', requireAuth, async (req, res) => {
   const { memberIds = [] } = req.body
-  const group = await Group.findOneAndUpdate(
-    { _id: req.params.id, members: req.userId },
-    { $addToSet: { members: { $each: memberIds } } },
-    { new: true }
-  ).populate('members admins createdBy')
-  if (!group) return res.status(404).json({ error: 'Group not found' })
+  const groupId = req.params.id
 
+  // Verify requester is a member
+  const isMember = await db.execute({
+    sql: 'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
+    args: [groupId, req.userId],
+  })
+  if (isMember.rows.length === 0) return res.status(404).json({ error: 'Group not found' })
+
+  await db.batch(
+    memberIds.map(uid => ({
+      sql: 'INSERT OR IGNORE INTO group_members (group_id, user_id, is_admin) VALUES (?, ?, 0)',
+      args: [groupId, uid],
+    })),
+    'write'
+  )
+
+  const group = await fetchGroup(groupId)
   const io = req.app.get('io')
-  io.to(`group:${group._id}`).emit('group_updated', { group })
-
+  io.to(`group:${groupId}`).emit('group_updated', { group })
   res.json(group)
 })
 
 // DELETE /api/groups/:id/leave
 router.delete('/:id/leave', requireAuth, async (req, res) => {
-  const group = await Group.findOneAndUpdate(
-    { _id: req.params.id, members: req.userId },
-    { $pull: { members: req.userId, admins: req.userId } },
-    { new: true }
-  )
-  if (!group) return res.status(404).json({ error: 'Group not found' })
+  const groupId = req.params.id
+
+  await db.execute({
+    sql: 'DELETE FROM group_members WHERE group_id = ? AND user_id = ?',
+    args: [groupId, req.userId],
+  })
 
   // Delete group if no members left
-  if (group.members.length === 0) {
-    await Group.findByIdAndDelete(group._id)
+  const remaining = await db.execute({
+    sql: 'SELECT COUNT(*) as cnt FROM group_members WHERE group_id = ?',
+    args: [groupId],
+  })
+  if (Number(remaining.rows[0].cnt) === 0) {
+    await db.execute({ sql: 'DELETE FROM groups WHERE id = ?', args: [groupId] })
   }
 
   const io = req.app.get('io')
-  io.to(`group:${group._id}`).emit('member_left', { groupId: group._id, userId: req.userId })
-
+  io.to(`group:${groupId}`).emit('member_left', { groupId, userId: req.userId })
   res.json({ ok: true })
 })
 

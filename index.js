@@ -3,7 +3,7 @@ const express = require('express')
 const http = require('http')
 const { Server } = require('socket.io')
 const cors = require('cors')
-const connectDB = require('./config/db')
+const { initDB } = require('./config/db')
 const setupSocket = require('./socket/handlers')
 
 const usersRouter    = require('./routes/users')
@@ -56,6 +56,6 @@ app.use((err, req, res, _next) => {
 setupSocket(io)
 
 const PORT = process.env.PORT || 3001
-connectDB().then(() => {
+initDB().then(() => {
   server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`))
 })
