@@ -17,7 +17,7 @@ const server = http.createServer(app)
 // Allow multiple origins (local dev + Render frontend)
 const ALLOWED_ORIGINS = (process.env.FRONTEND_URL || '')
   .split(',')
-  .map(s => s.trim())
+  .map(s => s.trim().replace(/\/$/, ''))  // strip trailing slash
   .filter(Boolean)
   .concat(['http://localhost:5173', 'http://localhost:5174'])
 
