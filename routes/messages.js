@@ -164,18 +164,19 @@ router.patch('/:id/recall', requireAuth, async (req, res) => {
   if (msg.rows[0].sender_id !== req.userId) return res.status(403).json({ error: 'Unauthorized' })
 
   await db.execute({ sql: 'UPDATE messages SET is_recalled = 1, text = "", media_url = "" WHERE id = ?', args: [id] })
-  
+
   const result = await db.execute({
     sql: `${MSG_SELECT} WHERE m.id = ? GROUP BY m.id`,
     args: [id],
   })
-  const message = rowToMessage(result.rows[0])
+  // Force recalled fields regardless of DB read timing (Turso replica lag)
+  const message = { ...rowToMessage(result.rows[0]), isRecalled: true, text: '', mediaUrl: null }
 
   const io = req.app.get('io')
-  const roomId = msg.rows[0].type === 'dm' 
+  const roomId = msg.rows[0].type === 'dm'
     ? getDMRoomId(msg.rows[0].sender_id, msg.rows[0].receiver_id)
     : getGroupRoomId(msg.rows[0].group_id)
-  
+
   io.to(roomId).emit('message_updated', message)
   res.json({ ok: true })
 })
