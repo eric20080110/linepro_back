@@ -156,4 +156,54 @@ router.delete('/:id/leave', requireAuth, async (req, res) => {
   res.json({ ok: true })
 })
 
+// DELETE /api/groups/:id/members/:userId (Kick)
+router.delete('/:id/members/:userId', requireAuth, async (req, res) => {
+  const { id: groupId, userId: targetUserId } = req.params
+  
+  // Verify requester is an admin
+  const requester = await db.execute({
+    sql: 'SELECT is_admin FROM group_members WHERE group_id = ? AND user_id = ?',
+    args: [groupId, req.userId],
+  })
+  if (requester.rows.length === 0 || !requester.rows[0].is_admin) {
+    return res.status(403).json({ error: 'Admin only' })
+  }
+
+  await db.execute({
+    sql: 'DELETE FROM group_members WHERE group_id = ? AND user_id = ?',
+    args: [groupId, targetUserId],
+  })
+
+  const group = await fetchGroup(groupId)
+  const io = req.app.get('io')
+  io.to(`group:${groupId}`).emit('member_left', { groupId, userId: targetUserId })
+  io.to(`user:${targetUserId}`).emit('group_updated', { group: null, groupId }) // Notify kicked user
+  res.json({ ok: true })
+})
+
+// PATCH /api/groups/:id/members/:userId/admin (Toggle Admin)
+router.patch('/:id/members/:userId/admin', requireAuth, async (req, res) => {
+  const { id: groupId, userId: targetUserId } = req.params
+  const { isAdmin } = req.body
+
+  // Verify requester is an admin
+  const requester = await db.execute({
+    sql: 'SELECT is_admin FROM group_members WHERE group_id = ? AND user_id = ?',
+    args: [groupId, req.userId],
+  })
+  if (requester.rows.length === 0 || !requester.rows[0].is_admin) {
+    return res.status(403).json({ error: 'Admin only' })
+  }
+
+  await db.execute({
+    sql: 'UPDATE group_members SET is_admin = ? WHERE group_id = ? AND user_id = ?',
+    args: [isAdmin ? 1 : 0, groupId, targetUserId],
+  })
+
+  const group = await fetchGroup(groupId)
+  const io = req.app.get('io')
+  io.to(`group:${groupId}`).emit('group_updated', { group })
+  res.json(group)
+})
+
 module.exports = router
