@@ -61,8 +61,20 @@ async function initDB() {
       group_id TEXT,
       text TEXT NOT NULL DEFAULT '',
       media_url TEXT NOT NULL DEFAULT '',
+      reply_to_id TEXT,
+      is_pinned INTEGER NOT NULL DEFAULT 0,
+      is_recalled INTEGER NOT NULL DEFAULT 0,
       timestamp INTEGER NOT NULL,
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE IF NOT EXISTS message_reactions (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      UNIQUE(message_id, user_id)
     );
 
     CREATE TABLE IF NOT EXISTS message_reads (
@@ -72,12 +84,11 @@ async function initDB() {
     );
   `)
   
-  // Safe migration for groups.avatar_url
-  try {
-    await db.execute("ALTER TABLE groups ADD COLUMN avatar_url TEXT NOT NULL DEFAULT '';")
-  } catch (e) {
-    // Column likely already exists
-  }
+  // Safe migrations
+  try { await db.execute("ALTER TABLE groups ADD COLUMN avatar_url TEXT NOT NULL DEFAULT '';") } catch (e) {}
+  try { await db.execute("ALTER TABLE messages ADD COLUMN reply_to_id TEXT;") } catch (e) {}
+  try { await db.execute("ALTER TABLE messages ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0;") } catch (e) {}
+  try { await db.execute("ALTER TABLE messages ADD COLUMN is_recalled INTEGER NOT NULL DEFAULT 0;") } catch (e) {}
 
   console.log('✅ Turso DB initialized')
 }

@@ -21,18 +21,35 @@ function rowToMessage(row) {
     groupId: row.group_id || null,
     text: row.text,
     mediaUrl: row.media_url || null,
+    replyToId: row.reply_to_id || null,
+    isPinned: Boolean(row.is_pinned),
+    isRecalled: Boolean(row.is_recalled),
     timestamp: Number(row.timestamp),
     readBy: row.read_by ? String(row.read_by).split(',') : [],
+    reactions: row.reactions_data ? JSON.parse(`[${row.reactions_data}]`) : [],
+    replyTo: row.reply_to_id ? {
+      _id: row.reply_to_id,
+      text: row.reply_text,
+      senderName: row.reply_sender_nickname || row.reply_sender_name,
+      senderColor: row.reply_sender_color,
+    } : null
   }
 }
 
 const MSG_SELECT = `
-  SELECT m.id, m.type, m.sender_id, m.receiver_id, m.group_id, m.text, m.media_url, m.timestamp,
+  SELECT m.*,
     u.name AS sender_name, u.nickname AS sender_nickname, u.avatar_color AS sender_color, u.avatar_url AS sender_avatar_url,
-    GROUP_CONCAT(mr.user_id) AS read_by
+    GROUP_CONCAT(DISTINCT mr.user_id) AS read_by,
+    (SELECT GROUP_CONCAT('{"userId":"' || user_id || '","emoji":"' || emoji || '"}') FROM message_reactions WHERE message_id = m.id) AS reactions_data,
+    rm.text AS reply_text,
+    ru.name AS reply_sender_name,
+    ru.nickname AS reply_sender_nickname,
+    ru.avatar_color AS reply_sender_color
   FROM messages m
   JOIN users u ON u.id = m.sender_id
   LEFT JOIN message_reads mr ON mr.message_id = m.id
+  LEFT JOIN messages rm ON rm.id = m.reply_to_id
+  LEFT JOIN users ru ON ru.id = rm.sender_id
 `
 
 // GET /api/messages/dm/:partnerId
@@ -79,7 +96,7 @@ router.get('/group/:groupId', requireAuth, async (req, res) => {
 
 // POST /api/messages/dm
 router.post('/dm', requireAuth, async (req, res) => {
-  const { receiverId, text, mediaUrl } = req.body
+  const { receiverId, text, mediaUrl, replyToId } = req.body
   const cleanText = text?.trim() || ''
   const cleanMedia = mediaUrl?.trim() || ''
   if (!receiverId || (!cleanText && !cleanMedia)) return res.status(400).json({ error: 'receiverId and text or mediaUrl required' })
@@ -88,8 +105,8 @@ router.post('/dm', requireAuth, async (req, res) => {
   const ts = Date.now()
   await db.batch([
     {
-      sql: 'INSERT INTO messages (id, type, sender_id, receiver_id, text, media_url, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      args: [id, 'dm', req.userId, receiverId, cleanText, cleanMedia, ts],
+      sql: 'INSERT INTO messages (id, type, sender_id, receiver_id, text, media_url, reply_to_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      args: [id, 'dm', req.userId, receiverId, cleanText, cleanMedia, replyToId || null, ts],
     },
     { sql: 'INSERT OR IGNORE INTO message_reads (message_id, user_id) VALUES (?, ?)', args: [id, req.userId] },
   ], 'write')
@@ -107,7 +124,7 @@ router.post('/dm', requireAuth, async (req, res) => {
 
 // POST /api/messages/group
 router.post('/group', requireAuth, async (req, res) => {
-  const { groupId, text, mediaUrl } = req.body
+  const { groupId, text, mediaUrl, replyToId } = req.body
   const cleanText = text?.trim() || ''
   const cleanMedia = mediaUrl?.trim() || ''
   if (!groupId || (!cleanText && !cleanMedia)) return res.status(400).json({ error: 'groupId and text or mediaUrl required' })
@@ -122,8 +139,8 @@ router.post('/group', requireAuth, async (req, res) => {
   const ts = Date.now()
   await db.batch([
     {
-      sql: 'INSERT INTO messages (id, type, sender_id, group_id, text, media_url, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      args: [id, 'group', req.userId, groupId, cleanText, cleanMedia, ts],
+      sql: 'INSERT INTO messages (id, type, sender_id, group_id, text, media_url, reply_to_id, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      args: [id, 'group', req.userId, groupId, cleanText, cleanMedia, replyToId || null, ts],
     },
     { sql: 'INSERT OR IGNORE INTO message_reads (message_id, user_id) VALUES (?, ?)', args: [id, req.userId] },
   ], 'write')
@@ -136,6 +153,82 @@ router.post('/group', requireAuth, async (req, res) => {
 
   const io = req.app.get('io')
   io.to(getGroupRoomId(groupId)).emit('new_message', message)
+  res.json(message)
+})
+
+// PATCH /api/messages/:id/recall
+router.patch('/:id/recall', requireAuth, async (req, res) => {
+  const { id } = req.params
+  const msg = await db.execute({ sql: 'SELECT sender_id, type, group_id, receiver_id FROM messages WHERE id = ?', args: [id] })
+  if (msg.rows.length === 0) return res.status(404).json({ error: 'Message not found' })
+  if (msg.rows[0].sender_id !== req.userId) return res.status(403).json({ error: 'Unauthorized' })
+
+  await db.execute({ sql: 'UPDATE messages SET is_recalled = 1, text = "", media_url = "" WHERE id = ?', args: [id] })
+  
+  const result = await db.execute({
+    sql: `${MSG_SELECT} WHERE m.id = ? GROUP BY m.id`,
+    args: [id],
+  })
+  const message = rowToMessage(result.rows[0])
+
+  const io = req.app.get('io')
+  const roomId = msg.rows[0].type === 'dm' 
+    ? getDMRoomId(msg.rows[0].sender_id, msg.rows[0].receiver_id)
+    : getGroupRoomId(msg.rows[0].group_id)
+  
+  io.to(roomId).emit('message_updated', message)
+  res.json({ ok: true })
+})
+
+// PATCH /api/messages/:id/pin
+router.patch('/:id/pin', requireAuth, async (req, res) => {
+  const { id } = req.params
+  const { pinned } = req.body
+  const msg = await db.execute({ sql: 'SELECT sender_id, type, group_id, receiver_id FROM messages WHERE id = ?', args: [id] })
+  if (msg.rows.length === 0) return res.status(404).json({ error: 'Message not found' })
+
+  await db.execute({ sql: 'UPDATE messages SET is_pinned = ? WHERE id = ?', args: [pinned ? 1 : 0, id] })
+  
+  const result = await db.execute({
+    sql: `${MSG_SELECT} WHERE m.id = ? GROUP BY m.id`,
+    args: [id],
+  })
+  const message = rowToMessage(result.rows[0])
+
+  const io = req.app.get('io')
+  const roomId = msg.rows[0].type === 'dm' 
+    ? getDMRoomId(msg.rows[0].sender_id, msg.rows[0].receiver_id)
+    : getGroupRoomId(msg.rows[0].group_id)
+  
+  io.to(roomId).emit('message_updated', message)
+  res.json({ ok: true })
+})
+
+// POST /api/messages/:id/react
+router.post('/:id/react', requireAuth, async (req, res) => {
+  const { id: messageId } = req.params
+  const { emoji } = req.body
+  if (!emoji) return res.status(400).json({ error: 'Emoji required' })
+
+  const id = randomUUID()
+  await db.execute({
+    sql: 'INSERT OR REPLACE INTO message_reactions (id, message_id, user_id, emoji) VALUES (?, ?, ?, ?)',
+    args: [id, messageId, req.userId, emoji]
+  })
+
+  const msg = await db.execute({ sql: 'SELECT sender_id, type, group_id, receiver_id FROM messages WHERE id = ?', args: [messageId] })
+  const result = await db.execute({
+    sql: `${MSG_SELECT} WHERE m.id = ? GROUP BY m.id`,
+    args: [messageId],
+  })
+  const message = rowToMessage(result.rows[0])
+
+  const io = req.app.get('io')
+  const roomId = msg.rows[0].type === 'dm' 
+    ? getDMRoomId(msg.rows[0].sender_id, msg.rows[0].receiver_id)
+    : getGroupRoomId(msg.rows[0].group_id)
+  
+  io.to(roomId).emit('message_updated', message)
   res.json(message)
 })
 
