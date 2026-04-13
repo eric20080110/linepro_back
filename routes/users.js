@@ -52,13 +52,14 @@ router.get('/me', requireAuth, (req, res) => {
 
 // PATCH /api/users/me
 router.patch('/me', requireAuth, async (req, res) => {
-  const { name, nickname, statusMessage, avatarColor, status } = req.body
+  const { name, nickname, statusMessage, avatarColor, avatarUrl, status } = req.body
   const fields = []
   const args = []
   if (name !== undefined)          { fields.push('name = ?');           args.push(name) }
   if (nickname !== undefined)      { fields.push('nickname = ?');       args.push(nickname) }
   if (statusMessage !== undefined) { fields.push('status_message = ?'); args.push(statusMessage) }
   if (avatarColor !== undefined)   { fields.push('avatar_color = ?');   args.push(avatarColor) }
+  if (avatarUrl !== undefined)     { fields.push('avatar_url = ?');     args.push(avatarUrl) }
   if (status !== undefined)        { fields.push('status = ?');         args.push(status) }
   if (fields.length === 0) return res.json(req.user)
 

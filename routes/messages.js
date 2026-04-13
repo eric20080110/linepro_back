@@ -15,18 +15,20 @@ function rowToMessage(row) {
       name: row.sender_name,
       nickname: row.sender_nickname || '',
       avatarColor: row.sender_color,
+      avatarUrl: row.sender_avatar_url || '',
     },
     receiverId: row.receiver_id || null,
     groupId: row.group_id || null,
     text: row.text,
+    mediaUrl: row.media_url || null,
     timestamp: Number(row.timestamp),
     readBy: row.read_by ? String(row.read_by).split(',') : [],
   }
 }
 
 const MSG_SELECT = `
-  SELECT m.id, m.type, m.sender_id, m.receiver_id, m.group_id, m.text, m.timestamp,
-    u.name AS sender_name, u.nickname AS sender_nickname, u.avatar_color AS sender_color,
+  SELECT m.id, m.type, m.sender_id, m.receiver_id, m.group_id, m.text, m.media_url, m.timestamp,
+    u.name AS sender_name, u.nickname AS sender_nickname, u.avatar_color AS sender_color, u.avatar_url AS sender_avatar_url,
     GROUP_CONCAT(mr.user_id) AS read_by
   FROM messages m
   JOIN users u ON u.id = m.sender_id
@@ -77,15 +79,17 @@ router.get('/group/:groupId', requireAuth, async (req, res) => {
 
 // POST /api/messages/dm
 router.post('/dm', requireAuth, async (req, res) => {
-  const { receiverId, text } = req.body
-  if (!receiverId || !text?.trim()) return res.status(400).json({ error: 'receiverId and text required' })
+  const { receiverId, text, mediaUrl } = req.body
+  const cleanText = text?.trim() || ''
+  const cleanMedia = mediaUrl?.trim() || ''
+  if (!receiverId || (!cleanText && !cleanMedia)) return res.status(400).json({ error: 'receiverId and text or mediaUrl required' })
 
   const id = randomUUID()
   const ts = Date.now()
   await db.batch([
     {
-      sql: 'INSERT INTO messages (id, type, sender_id, receiver_id, text, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
-      args: [id, 'dm', req.userId, receiverId, text.trim(), ts],
+      sql: 'INSERT INTO messages (id, type, sender_id, receiver_id, text, media_url, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      args: [id, 'dm', req.userId, receiverId, cleanText, cleanMedia, ts],
     },
     { sql: 'INSERT OR IGNORE INTO message_reads (message_id, user_id) VALUES (?, ?)', args: [id, req.userId] },
   ], 'write')
@@ -103,8 +107,10 @@ router.post('/dm', requireAuth, async (req, res) => {
 
 // POST /api/messages/group
 router.post('/group', requireAuth, async (req, res) => {
-  const { groupId, text } = req.body
-  if (!groupId || !text?.trim()) return res.status(400).json({ error: 'groupId and text required' })
+  const { groupId, text, mediaUrl } = req.body
+  const cleanText = text?.trim() || ''
+  const cleanMedia = mediaUrl?.trim() || ''
+  if (!groupId || (!cleanText && !cleanMedia)) return res.status(400).json({ error: 'groupId and text or mediaUrl required' })
 
   const isMember = await db.execute({
     sql: 'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
@@ -116,8 +122,8 @@ router.post('/group', requireAuth, async (req, res) => {
   const ts = Date.now()
   await db.batch([
     {
-      sql: 'INSERT INTO messages (id, type, sender_id, group_id, text, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
-      args: [id, 'group', req.userId, groupId, text.trim(), ts],
+      sql: 'INSERT INTO messages (id, type, sender_id, group_id, text, media_url, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      args: [id, 'group', req.userId, groupId, cleanText, cleanMedia, ts],
     },
     { sql: 'INSERT OR IGNORE INTO message_reads (message_id, user_id) VALUES (?, ?)', args: [id, req.userId] },
   ], 'write')

@@ -10,6 +10,7 @@ const usersRouter    = require('./routes/users')
 const friendsRouter  = require('./routes/friends')
 const groupsRouter   = require('./routes/groups')
 const messagesRouter = require('./routes/messages')
+const uploadRouter   = require('./routes/upload')
 
 const app = express()
 const server = http.createServer(app)
@@ -45,6 +46,7 @@ app.use('/api/users',    usersRouter)
 app.use('/api/friends',  friendsRouter)
 app.use('/api/groups',   groupsRouter)
 app.use('/api/messages', messagesRouter)
+app.use('/api/upload',   uploadRouter)
 
 app.get('/health', (_, res) => res.json({ status: 'ok' }))
 

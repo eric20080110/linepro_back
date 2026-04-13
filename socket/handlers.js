@@ -34,6 +34,27 @@ function setupSocket(io) {
       socket.to(roomId).emit('messages_read', { readerId, roomId })
     })
 
+    // WebRTC signaling relay
+    socket.on('call_offer', ({ targetId, offer, callerId, callerName }) => {
+      io.to(`user:${targetId}`).emit('incoming_call', { callerId, callerName, offer })
+    })
+
+    socket.on('call_answer', ({ callerId, answer }) => {
+      io.to(`user:${callerId}`).emit('call_answered', { answer })
+    })
+
+    socket.on('ice_candidate', ({ targetId, candidate }) => {
+      io.to(`user:${targetId}`).emit('ice_candidate', { candidate })
+    })
+
+    socket.on('call_end', ({ targetId }) => {
+      io.to(`user:${targetId}`).emit('call_ended')
+    })
+
+    socket.on('call_rejected', ({ callerId }) => {
+      io.to(`user:${callerId}`).emit('call_rejected')
+    })
+
     socket.on('disconnect', async () => {
       await db.execute({ sql: "UPDATE users SET status = 'offline' WHERE id = ?", args: [userId] }).catch(() => {})
       socket.broadcast.emit('status_changed', { userId, status: 'offline' })

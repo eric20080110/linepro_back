@@ -14,6 +14,7 @@ async function initDB() {
       nickname TEXT NOT NULL DEFAULT '',
       email TEXT NOT NULL DEFAULT '',
       avatar_color TEXT NOT NULL DEFAULT '#06C755',
+      avatar_url TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'offline',
       status_message TEXT NOT NULL DEFAULT '',
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -57,7 +58,8 @@ async function initDB() {
       sender_id TEXT NOT NULL,
       receiver_id TEXT,
       group_id TEXT,
-      text TEXT NOT NULL,
+      text TEXT NOT NULL DEFAULT '',
+      media_url TEXT NOT NULL DEFAULT '',
       timestamp INTEGER NOT NULL,
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
@@ -80,6 +82,7 @@ function rowToUser(row) {
     nickname: row.nickname,
     email: row.email,
     avatarColor: row.avatar_color,
+    avatarUrl: row.avatar_url || '',
     status: row.status,
     statusMessage: row.status_message,
   }
