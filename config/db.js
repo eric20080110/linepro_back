@@ -41,6 +41,7 @@ async function initDB() {
       name TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
       avatar_color TEXT NOT NULL DEFAULT '#06C755',
+      avatar_url TEXT NOT NULL DEFAULT '',
       created_by TEXT NOT NULL,
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
@@ -70,6 +71,14 @@ async function initDB() {
       PRIMARY KEY(message_id, user_id)
     );
   `)
+  
+  // Safe migration for groups.avatar_url
+  try {
+    await db.execute("ALTER TABLE groups ADD COLUMN avatar_url TEXT NOT NULL DEFAULT '';")
+  } catch (e) {
+    // Column likely already exists
+  }
+
   console.log('✅ Turso DB initialized')
 }
 

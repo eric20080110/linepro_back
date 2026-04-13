@@ -26,6 +26,7 @@ async function fetchGroup(groupId) {
     name: g.name,
     description: g.description,
     avatarColor: g.avatar_color,
+    avatarUrl: g.avatar_url || '',
     createdBy: g.created_by,
     members,
     admins,
@@ -75,6 +76,34 @@ router.get('/:id', requireAuth, async (req, res) => {
   })
   if (member.rows.length === 0) return res.status(404).json({ error: 'Group not found' })
   const group = await fetchGroup(req.params.id)
+  res.json(group)
+})
+
+// PATCH /api/groups/:id
+router.patch('/:id', requireAuth, async (req, res) => {
+  const groupId = req.params.id
+  // Verify requester is a member (or admin depending on rules, let's say member can update)
+  const isMember = await db.execute({
+    sql: 'SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?',
+    args: [groupId, req.userId],
+  })
+  if (isMember.rows.length === 0) return res.status(404).json({ error: 'Group not found' })
+
+  const { name, description, avatarUrl } = req.body
+  const fields = []
+  const args = []
+  if (name !== undefined) { fields.push('name = ?'); args.push(name) }
+  if (description !== undefined) { fields.push('description = ?'); args.push(description) }
+  if (avatarUrl !== undefined) { fields.push('avatar_url = ?'); args.push(avatarUrl) }
+
+  if (fields.length > 0) {
+    args.push(groupId)
+    await db.execute({ sql: `UPDATE groups SET ${fields.join(', ')} WHERE id = ?`, args })
+  }
+
+  const group = await fetchGroup(groupId)
+  const io = req.app.get('io')
+  io.to(`group:${groupId}`).emit('group_updated', { group })
   res.json(group)
 })
 
