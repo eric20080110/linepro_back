@@ -158,51 +158,65 @@ router.post('/group', requireAuth, async (req, res) => {
 
 // PATCH /api/messages/:id/recall
 router.patch('/:id/recall', requireAuth, async (req, res) => {
-  const { id } = req.params
-  const msg = await db.execute({ sql: 'SELECT sender_id, type, group_id, receiver_id FROM messages WHERE id = ?', args: [id] })
-  if (msg.rows.length === 0) return res.status(404).json({ error: 'Message not found' })
-  if (msg.rows[0].sender_id !== req.userId) return res.status(403).json({ error: 'Unauthorized' })
+  try {
+    const { id } = req.params
+    const msg = await db.execute({ sql: 'SELECT sender_id, type, group_id, receiver_id FROM messages WHERE id = ?', args: [id] })
+    if (msg.rows.length === 0) return res.status(404).json({ error: 'Message not found' })
+    if (msg.rows[0].sender_id !== req.userId) return res.status(403).json({ error: 'Unauthorized' })
 
-  await db.execute({ sql: 'UPDATE messages SET is_recalled = 1, text = "", media_url = "" WHERE id = ?', args: [id] })
+    await db.batch([
+      { sql: "UPDATE messages SET is_recalled = 1, text = '', media_url = '' WHERE id = ?", args: [id] },
+    ], 'write')
 
-  const result = await db.execute({
-    sql: `${MSG_SELECT} WHERE m.id = ? GROUP BY m.id`,
-    args: [id],
-  })
-  // Force recalled fields regardless of DB read timing (Turso replica lag)
-  const message = { ...rowToMessage(result.rows[0]), isRecalled: true, text: '', mediaUrl: null }
+    const result = await db.execute({
+      sql: `${MSG_SELECT} WHERE m.id = ? GROUP BY m.id`,
+      args: [id],
+    })
+    // Force recalled fields regardless of DB read timing (Turso replica lag)
+    const message = { ...rowToMessage(result.rows[0]), isRecalled: true, text: '', mediaUrl: null }
 
-  const io = req.app.get('io')
-  const roomId = msg.rows[0].type === 'dm'
-    ? getDMRoomId(msg.rows[0].sender_id, msg.rows[0].receiver_id)
-    : getGroupRoomId(msg.rows[0].group_id)
+    const io = req.app.get('io')
+    const roomId = msg.rows[0].type === 'dm'
+      ? getDMRoomId(msg.rows[0].sender_id, msg.rows[0].receiver_id)
+      : getGroupRoomId(msg.rows[0].group_id)
 
-  io.to(roomId).emit('message_updated', message)
-  res.json({ ok: true })
+    io.to(roomId).emit('message_updated', message)
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('recall error:', err)
+    res.status(500).json({ error: 'Failed to recall message' })
+  }
 })
 
 // PATCH /api/messages/:id/pin
 router.patch('/:id/pin', requireAuth, async (req, res) => {
-  const { id } = req.params
-  const { pinned } = req.body
-  const msg = await db.execute({ sql: 'SELECT sender_id, type, group_id, receiver_id FROM messages WHERE id = ?', args: [id] })
-  if (msg.rows.length === 0) return res.status(404).json({ error: 'Message not found' })
+  try {
+    const { id } = req.params
+    const { pinned } = req.body
+    const msg = await db.execute({ sql: 'SELECT sender_id, type, group_id, receiver_id FROM messages WHERE id = ?', args: [id] })
+    if (msg.rows.length === 0) return res.status(404).json({ error: 'Message not found' })
 
-  await db.execute({ sql: 'UPDATE messages SET is_pinned = ? WHERE id = ?', args: [pinned ? 1 : 0, id] })
-  
-  const result = await db.execute({
-    sql: `${MSG_SELECT} WHERE m.id = ? GROUP BY m.id`,
-    args: [id],
-  })
-  const message = rowToMessage(result.rows[0])
+    await db.batch([
+      { sql: 'UPDATE messages SET is_pinned = ? WHERE id = ?', args: [pinned ? 1 : 0, id] },
+    ], 'write')
 
-  const io = req.app.get('io')
-  const roomId = msg.rows[0].type === 'dm' 
-    ? getDMRoomId(msg.rows[0].sender_id, msg.rows[0].receiver_id)
-    : getGroupRoomId(msg.rows[0].group_id)
-  
-  io.to(roomId).emit('message_updated', message)
-  res.json({ ok: true })
+    const result = await db.execute({
+      sql: `${MSG_SELECT} WHERE m.id = ? GROUP BY m.id`,
+      args: [id],
+    })
+    const message = rowToMessage(result.rows[0])
+
+    const io = req.app.get('io')
+    const roomId = msg.rows[0].type === 'dm'
+      ? getDMRoomId(msg.rows[0].sender_id, msg.rows[0].receiver_id)
+      : getGroupRoomId(msg.rows[0].group_id)
+
+    io.to(roomId).emit('message_updated', message)
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('pin error:', err)
+    res.status(500).json({ error: 'Failed to pin message' })
+  }
 })
 
 // POST /api/messages/:id/react
