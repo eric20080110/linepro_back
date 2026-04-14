@@ -35,8 +35,13 @@ function setupSocket(io) {
     })
 
     // WebRTC signaling relay
-    socket.on('call_offer', ({ targetId, offer, callerId, callerName }) => {
-      io.to(`user:${targetId}`).emit('incoming_call', { callerId, callerName, offer })
+    socket.on('call_offer', ({ targetId, offer, callerId, callerName, callType }) => {
+      io.to(`user:${targetId}`).emit('incoming_call', {
+        callerId,
+        callerName,
+        callType: callType || 'video',
+        offer: { type: offer.type, sdp: offer.sdp }, // only standard SDP fields
+      })
     })
 
     socket.on('call_answer', ({ callerId, answer }) => {
